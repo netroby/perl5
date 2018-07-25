@@ -1554,7 +1554,7 @@ Perl_utf8_hop_forward(const U8 *s, SSize_t off, const U8 *end)
 
     while (off--) {
         STRLEN skip = UTF8SKIP(s);
-        if ((STRLEN)(end - s) <= skip) {
+        if (s + skip > end) {
             GCC_DIAG_IGNORE(-Wcast-qual)
             return (U8 *)end;
             GCC_DIAG_RESTORE
