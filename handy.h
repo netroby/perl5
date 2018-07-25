@@ -1830,7 +1830,7 @@ END_EXTERN_C
                     _generic_utf8_safe(classnum, p, e, above_latin1(p, e))
 #define _generic_non_swash_utf8_safe(classnum, above_latin1, p, e)          \
           _generic_utf8_safe(classnum, p, e,                                \
-                             (UNLIKELY((e) - (p) < UTF8SKIP(p))             \
+                             (UNLIKELY((p) + UTF8SKIP(p) > (e))             \
                               ? (_force_out_malformed_utf8_message(         \
                                       (U8 *) (p), (U8 *) (e), 0, 1), 0)     \
                               : above_latin1(p)))
@@ -1920,7 +1920,7 @@ _generic_utf8_safe(classnum, p, e, _is_utf8_FOO_with_len(classnum, p, e))
                              _generic_swash_utf8_safe(_CC_WORDCHAR, p, e)
 #define isXDIGIT_utf8_safe(p, e)                                            \
                    _generic_utf8_safe_no_upper_latin1(_CC_XDIGIT, p, e,     \
-                             (UNLIKELY((e) - (p) < UTF8SKIP(p))             \
+                             (UNLIKELY((p) + UTF8SKIP(p) > (e))             \
                               ? (_force_out_malformed_utf8_message(         \
                                       (U8 *) (p), (U8 *) (e), 0, 1), 0)     \
                               : is_XDIGIT_high(p)))
@@ -1989,7 +1989,7 @@ _generic_utf8_safe(classnum, p, e, _is_utf8_FOO_with_len(classnum, p, e))
 
 #define _generic_LC_non_swash_utf8_safe(classnum, above_latin1, p, e)       \
           _generic_LC_utf8_safe(classnum, p, e,                             \
-                             (UNLIKELY((e) - (p) < UTF8SKIP(p))             \
+                             (UNLIKELY((p) + UTF8SKIP(p) > (e))             \
                               ? (_force_out_malformed_utf8_message(         \
                                       (U8 *) (p), (U8 *) (e), 0, 1), 0)     \
                               : above_latin1(p)))
