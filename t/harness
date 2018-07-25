@@ -165,10 +165,59 @@ if (@ARGV) {
 	    if ($^O eq 'MSWin32') {
 		s,\\,/,g; # canonicalize path
 	    };
-	    # Treat every file matching lib/*.t as a "directory"
-	    m! \A ( \.\. / (?: lib | ext/XS-APItest/t )
-                         / [^/]+ \.t \z | .* [/] ) !x
+	    # Treat most .t files as an individual "directory", so that they
+            # will be executed in parallel.  A few directories must be
+            # executed sequentially, 
+            #use re qw(Debug ALL);
+            m" \A ( \.\. / (?! cpan/Archive-Tar
+                             | cpan/autodie
+                             | cpan/AutoLoader
+                             | cpan/Compress-Raw-Bzip2
+                             | cpan/Compress-Raw-Zlib
+                             | cpan/CPAN
+                             | cpan/CPAN-Meta-YAML
+                             | cpan/ExtUtils-MakeMaker
+                             | cpan/File-Fetch
+                             | cpan/HTTP-Tiny
+                             | cpan/IO-Compress
+                             | cpan/IO-Socket-IP
+                             | cpan/IO-Zlib
+                             | cpan/IPC-Cmd
+                             | cpan/JSON-PP
+                             | cpan/Locale-Maketext-Simple
+                             | cpan/Module-Load
+                             | cpan/Module-Load-Conditional
+                             | cpan/Module-Loaded
+                             | cpan/Params-Check
+                             | cpan/Pod-Escapes
+                             | cpan/Pod-Perldoc
+                             | cpan/Pod-Simple
+                             | cpan/Scalar-List-Utils
+                             | cpan/Sys-Syslog
+                             | cpan/Text-Balanced
+                             | cpan/Time-Piece
+                             | cpan/version
+                             | dist/ExtUtils-CBuilder
+                             | dist/ExtUtils-ParseXS
+                             | dist/I18N-LangTags
+                             | dist/lib
+                             | dist/Locale-Maketext
+                             | dist/Net-Ping
+                             | dist/SelfLoader
+                             | dist/Test
+                             | dist/Thread-Queue
+                             | dist/Thread-Semaphore
+                             | dist/threads-shared
+                             | dist/Tie-File
+                             | ext/FileCache
+                             | ext/File-Find
+                             | ext/GDBM_File
+                             | ext/Hash-Util-FieldHash
+                             | ext/Pod-Html
+                             | lib/DBM_Filter
+                           ) .*? / [^/]+ \.t \z | .* [/] ) "x
                 or die "'$_'";
+            #print STDERR __FILE__, __LINE__, ": pushing $_ onto \$dir{$1}\n";
 	    push @{$dir{$1}}, $_;
 	    $total_time{$1} += $times{$_} || 0;
 	}
