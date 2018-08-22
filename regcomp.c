@@ -2014,8 +2014,7 @@ S_ssc_finalize(pTHX_ RExC_state_t *pRExC_state, regnode_ssc *ssc)
 
     populate_ANYOF_from_invlist( (regnode *) ssc, &invlist);
 
-    set_ANYOF_arg(pRExC_state, (regnode *) ssc, invlist,
-                                NULL, NULL, NULL, FALSE);
+    set_ANYOF_arg(pRExC_state, (regnode *) ssc, invlist, NULL, NULL);
 
     /* Make sure is clone-safe */
     ssc->invlist = NULL;
@@ -9023,100 +9022,6 @@ Perl__invlist_search(SV* const invlist, const UV cp)
     high--;
     invlist_set_previous_index(invlist, high);
     return high;
-}
-
-void
-Perl__invlist_populate_swatch(SV* const invlist,
-                              const UV start, const UV end, U8* swatch)
-{
-    /* populates a swatch of a swash the same way swatch_get() does in utf8.c,
-     * but is used when the swash has an inversion list.  This makes this much
-     * faster, as it uses a binary search instead of a linear one.  This is
-     * intimately tied to that function, and perhaps should be in utf8.c,
-     * except it is intimately tied to inversion lists as well.  It assumes
-     * that <swatch> is all 0's on input */
-
-    UV current = start;
-    const IV len = _invlist_len(invlist);
-    IV i;
-    const UV * array;
-
-    PERL_ARGS_ASSERT__INVLIST_POPULATE_SWATCH;
-
-    if (len == 0) { /* Empty inversion list */
-        return;
-    }
-
-    array = invlist_array(invlist);
-
-    /* Find which element it is */
-    i = _invlist_search(invlist, start);
-
-    /* We populate from <start> to <end> */
-    while (current < end) {
-        UV upper;
-
-	/* The inversion list gives the results for every possible code point
-	 * after the first one in the list.  Only those ranges whose index is
-	 * even are ones that the inversion list matches.  For the odd ones,
-	 * and if the initial code point is not in the list, we have to skip
-	 * forward to the next element */
-        if (i == -1 || ! ELEMENT_RANGE_MATCHES_INVLIST(i)) {
-            i++;
-            if (i >= len) { /* Finished if beyond the end of the array */
-                return;
-            }
-            current = array[i];
-	    if (current >= end) {   /* Finished if beyond the end of what we
-				       are populating */
-                if (LIKELY(end < UV_MAX)) {
-                    return;
-                }
-
-                /* We get here when the upper bound is the maximum
-                 * representable on the machine, and we are looking for just
-                 * that code point.  Have to special case it */
-                i = len;
-                goto join_end_of_list;
-            }
-        }
-        assert(current >= start);
-
-	/* The current range ends one below the next one, except don't go past
-	 * <end> */
-        i++;
-        upper = (i < len && array[i] < end) ? array[i] : end;
-
-	/* Here we are in a range that matches.  Populate a bit in the 3-bit U8
-	 * for each code point in it */
-        for (; current < upper; current++) {
-            const STRLEN offset = (STRLEN)(current - start);
-            swatch[offset >> 3] |= 1 << (offset & 7);
-        }
-
-      join_end_of_list:
-
-	/* Quit if at the end of the list */
-        if (i >= len) {
-
-	    /* But first, have to deal with the highest possible code point on
-	     * the platform.  The previous code assumes that <end> is one
-	     * beyond where we want to populate, but that is impossible at the
-	     * platform's infinity, so have to handle it specially */
-            if (UNLIKELY(end == UV_MAX && ELEMENT_RANGE_MATCHES_INVLIST(len-1)))
-	    {
-                const STRLEN offset = (STRLEN)(end - start);
-                swatch[offset >> 3] |= 1 << (offset & 7);
-            }
-            return;
-        }
-
-	/* Advance to the next range, which will be for code points not in the
-	 * inversion list */
-        current = array[i];
-    }
-
-    return;
 }
 
 void
@@ -16344,7 +16249,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
      *
      * ANYOF nodes contain a bit map for the first NUM_ANYOF_CODE_POINTS
      * characters, with the corresponding bit set if that character is in the
-     * list.  For characters above this, a range list or swash is used.  There
+     * list.  For characters above this, an inversion list is used.  There
      * are extra bits for \w, etc. in locale ANYOFs, as what these match is not
      * determinable at compile time
      *
@@ -16390,18 +16295,6 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
     /* ignore unescaped whitespace? */
     const bool skip_white = cBOOL(   ret_invlist
                                   || (RExC_flags & RXf_PMf_EXTENDED_MORE));
-
-    /* Unicode properties are stored in a swash; this holds the current one
-     * being parsed.  If this swash is the only above-latin1 component of the
-     * character class, an optimization is to pass it directly on to the
-     * execution engine.  Otherwise, it is set to NULL to indicate that there
-     * are other things in the class that have to be dealt with at execution
-     * time */
-    SV* swash = NULL;		/* Code points that match \p{} \P{} */
-
-    /* Set if a component of this character class is user-defined; just passed
-     * on to the engine */
-    bool has_user_defined_property = FALSE;
 
     /* inversion list of code points this node matches only when the target
      * string is in UTF-8.  These are all non-ASCII, < 256.  (Because is under
@@ -16734,7 +16627,6 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
 		{
 		char *e;
 
-                SvREFCNT_dec(swash); /* Free any left-overs */
 		if (RExC_parse >= RExC_end)
 		    vFAIL2("Empty \\%c", (U8)value);
 		if (*RExC_parse == '{') {
@@ -16815,10 +16707,6 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
                                     SvCUR(msg), SvPVX(msg)));
                     }
 
-                    if (user_defined) {
-                        has_user_defined_property = TRUE;
-                    }
-
                     if (! is_invlist(prop_definition)) {
 
                         /* Here, the definition isn't known, so we have gotten
@@ -16876,12 +16764,6 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
 			    _invlist_union_complement_2nd(properties,
                                                           prop_definition,
                                                           &properties);
-
-                            /* The swash can't be used as-is, because we've
-			     * inverted things; delay removing it to here after
-			     * have copied its invlist above */
-                            SvREFCNT_dec(swash);
-                            swash = NULL;
                         }
                         else {
                             _invlist_union(properties, prop_definition, &properties);
@@ -17968,8 +17850,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
 
     /* And combine the result (if any) with any inversion lists from posix
      * classes.  The lists are kept separate up to now because we don't want to
-     * fold the classes (folding of those is automatically handled by the swash
-     * fetching code) */
+     * fold the classes */
     if (simple_posixes) {   /* These are the classes known to be unaffected by
                                /a, /aa, and /d */
         if (cp_list) {
@@ -18150,10 +18031,9 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
      * folded until runtime */
 
     /* If we didn't do folding, it's because some information isn't available
-     * until runtime; set the run-time fold flag for these.  (We don't have to
-     * worry about properties folding, as that is taken care of by the swash
-     * fetching).  We know to set the flag if we have a non-NULL list for UTF-8
-     * locales, or the class matches at least one 0-255 range code point */
+     * until runtime; set the run-time fold flag for these  We know to set the
+     * flag if we have a non-NULL list for UTF-8 locales, or the class matches
+     * at least one 0-255 range code point */
     if (LOC && FOLD) {
 
         /* Some things on the list might be unconditionally included because of
@@ -18203,12 +18083,6 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
     {
         _invlist_invert(cp_list);
 
-        /* Any swash can't be used as-is, because we've inverted things */
-        if (swash) {
-            SvREFCNT_dec_NN(swash);
-            swash = NULL;
-        }
-
 	/* Clear the invert flag since have just done it here */
 	invert = FALSE;
     }
@@ -18217,7 +18091,6 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
         assert(cp_list);
 
         *ret_invlist = cp_list;
-        SvREFCNT_dec(swash);
 
         /* Discard the generated node */
         if (SIZE_ONLY) {
@@ -18238,7 +18111,7 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
      * been allocated in Pass 1, and currently isn't given back.  XXX Why not?
      * But turning things into an EXACTish node can allow the optimizer to join
      * it to any adjacent such nodes.  And if the class is equivalent to things
-     * like /./, expensive run-time swashes can be avoided.  Now that we have
+     * like /./, expensive run-time lookups can be avoided.  Now that we have
      * more complete information, we can find things necessarily missed by the
      * earlier code. */
 
@@ -18547,22 +18420,10 @@ S_regclass(pTHX_ RExC_state_t *pRExC_state, I32 *flagp, U32 depth,
         ANYOF_FLAGS(ret) |= ANYOF_SHARED_d_UPPER_LATIN1_UTF8_STRING_MATCHES_non_d_RUNTIME_USER_PROP;
     }
 
-    /* If there is a swash and more than one element, we can't use the swash in
-     * the optimization below. */
-    if (swash && element_count > 1) {
-	SvREFCNT_dec_NN(swash);
-	swash = NULL;
-    }
-
-    /* Note that the optimization of using 'swash' if it is the only thing in
-     * the class doesn't have us change swash at all, so it can include things
-     * that are also in the bitmap; otherwise we have purposely deleted that
-     * duplicate information */
     set_ANYOF_arg(pRExC_state, ret, cp_list,
                   (HAS_NONLOCALE_RUNTIME_PROPERTY_DEFINITION)
                    ? listsv : NULL,
-                  only_utf8_locale_list,
-                  swash, has_user_defined_property);
+                  only_utf8_locale_list);
 
     *flagp |= HASWIDTH|SIMPLE;
 
@@ -18580,9 +18441,7 @@ S_set_ANYOF_arg(pTHX_ RExC_state_t* const pRExC_state,
                 regnode* const node,
                 SV* const cp_list,
                 SV* const runtime_defns,
-                SV* const only_utf8_locale_list,
-                SV* const swash,
-                const bool has_user_defined_property)
+                SV* const only_utf8_locale_list)
 {
     /* Sets the arg field of an ANYOF-type node 'node', using information about
      * the node passed-in.  If there is nothing outside the node's bitmap, the
@@ -18641,14 +18500,15 @@ Perl__get_regclass_nonbitmap_data(pTHX_ const regexp *prog,
 
 {
     /* For internal core use only.
-     * Returns the swash for the input 'node' in the regex 'prog'.
-     * If <doinit> is 'true', will attempt to create the swash if not already
-     *	  done.
+     * Returns the inversion list for the input 'node' in the regex 'prog'.
+     * If <doinit> is 'true', will attempt to create the inversion list if not
+     *    already done.
      * If <listsvp> is non-null, will return the printable contents of the
-     *    swash.  This can be used to get debugging information even before the
-     *    swash exists, by calling this function with 'doinit' set to false, in
-     *    which case the components that will be used to eventually create the
-     *    swash are returned  (in a printable form).
+     *    property definition.  This can be used to get debugging information
+     *    even before the inversion list exists, by calling this function with
+     *    'doinit' set to false, in which case the components that will be used
+     *    to eventually create the inversion list are returned  (in a printable
+     *    form).
      * If <only_utf8_locale_ptr> is not NULL, it is where this routine is to
      *    store an inversion list of code points that should match only if the
      *    execution-time locale is a UTF-8 one.
@@ -18656,17 +18516,17 @@ Perl__get_regclass_nonbitmap_data(pTHX_ const regexp *prog,
      *    inversion list of the code points that would be instead returned in
      *    <listsvp> if this were NULL.  Thus, what gets output in <listsvp>
      *    when this parameter is used, is just the non-code point data that
-     *    will go into creating the swash.  This currently should be just
+     *    will go into creating the inversion list.  This currently should be just
      *    user-defined properties whose definitions were not known at compile
      *    time.  Using this parameter allows for easier manipulation of the
-     *    swash's data by the caller.  It is illegal to call this function with
-     *    this parameter set, but not <listsvp>
+     *    inversion list's data by the caller.  It is illegal to call this
+     *    function with this parameter set, but not <listsvp>
      *
      * Tied intimately to how S_set_ANYOF_arg sets up the data structure.  Note
-     * that, in spite of this function's name, the swash it returns may include
-     * the bitmap data as well */
+     * that, in spite of this function's name, the inversion list it returns
+     * may include the bitmap data as well */
 
-    SV *si  = NULL;         /* Input swash initialization string */
+    SV *si  = NULL;         /* Input initialization string */
     SV* invlist = NULL;
 
     RXi_GET_DECL(prog,progi);
@@ -18732,15 +18592,15 @@ Perl__get_regclass_nonbitmap_data(pTHX_ const regexp *prog,
 	}
     }
 
-    /* If requested, return a printable version of what this swash matches */
+    /* If requested, return a printable version of what this ANYOF node matches
+     * */
     if (listsvp) {
 	SV* matches_string = NULL;
 
-        /* The swash should be used, if possible, to get the data, as it
-         * contains the resolved data.  But this function can be called at
-         * compile-time, before everything gets resolved, in which case we
-         * return the currently best available information, which is the string
-         * that will eventually be used to do that resolving, 'si' */
+        /* This function can be called at compile-time, before everything gets
+         * resolved, in which case we return the currently best available
+         * information, which is the string that will eventually be used to do
+         * that resolving, 'si' */
 	if (si) {
             /* Here, we only have 'si' (and possibly some passed-in data in
              * 'invlist', which is handled below)  If the caller only wants
@@ -18834,12 +18694,10 @@ Perl__get_regclass_nonbitmap_data(pTHX_ const regexp *prog,
                 if (SvCUR(matches_string)) {  /* Get rid of trailing blank */
                     SvCUR_set(matches_string, SvCUR(matches_string) - 1);
                 }
-            } /* end of has an 'si' but no swash */
+            } /* end of has an 'si' */
 	}
 
-        /* If we have a swash in place, its equivalent inversion list was above
-         * placed into 'invlist'.  If not, this variable may contain a stored
-         * inversion list which is information beyond what is in 'si' */
+        /* Add the stuff that's already known */
         if (invlist) {
 
             /* Again, if the caller doesn't want the output inversion list, put
